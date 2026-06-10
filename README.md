@@ -70,10 +70,13 @@ vim.keymap.set('x', '<leader>R', ':w !rif-tmux<CR>', { desc = 'Speed-read select
 
 ## Text size
 
-Terminals can't change their font size from inside a program, so sizes 2-5
-render words as big block glyphs (a built-in 5x7 bitmap font from Adafruit-GFX,
-drawn with Unicode half-blocks), with the ORP letter still colored. Size 1 is
-plain terminal text. Words too big for the window auto-shrink to fit.
+Terminals can't change their font size from inside a program, so sizes 2-7
+render words with the embedded [Spleen](https://github.com/fcambus/spleen)
+bitmap font (BSD 2-Clause, © Frederic Cambus), drawn with Unicode half-blocks
+and the ORP letter still colored. Each size uses a larger *native* Spleen
+variant (6x12 → 8x16 → 12x24 → 16x32), so letterforms stay smooth instead of
+getting blockier as they grow; only 6-7 pixel-double. Size 1 is plain terminal
+text. Words too big for the window auto-shrink down the size ladder to fit.
 
 Speed and size persist across runs in `~/.config/rif/config` (or
 `$XDG_CONFIG_HOME/rif/config`) — whatever you set with the keys is what you

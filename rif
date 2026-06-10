@@ -22,6 +22,7 @@ Speed and text size persist across runs in ~/.config/rif/config.
 """
 
 import argparse
+import base64
 import os
 import re
 import select
@@ -30,6 +31,7 @@ import sys
 import termios
 import time
 import tty
+import zlib
 
 ANSI_RE = re.compile(r'\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?|.)')
 SENT_END = re.compile(r'[.!?…]["\'’”)\]]*$')
@@ -41,24 +43,89 @@ REV = '\x1b[7m'
 RST = '\x1b[0m'
 
 MIN_WPM, MAX_WPM, WPM_STEP = 60, 1500, 25
-MIN_SCALE, MAX_SCALE = 1, 5  # 1 = plain terminal text, 2+ = block glyphs
+MIN_SCALE, MAX_SCALE = 1, 7  # 1 = plain terminal text, 2+ = bitmap glyphs
 
-# Classic 5x7 bitmap font (ASCII 32-126), column-major, bit 0 = top row.
-# Extracted from Adafruit-GFX glcdfont.c (BSD license).
-FONT5X7 = (
-    '000000000000005f00000007000700147f147f14242a7f2a12231308646236495620500008070300001c2241000041221c00'
-    '2a1c7f1c2a08083e080800807030000808080808000060600020100804023e5149453e00427f400072494949462141494d33'
-    '1814127f1027454545393c4a49493141211109073649494936464949291e0000140000004034000000081422411414141414'
-    '004122140802015909063e415d594e7c1211127c7f494949363e414141227f4141413e7f494949417f090909013e41415173'
-    '7f0808087f00417f41002040413f017f081422417f404040407f021c027f7f0408107f3e4141413e7f090909063e4151215e'
-    '7f09192946264949493203017f01033f4040403f1f2040201f3f4038403f631408146303047804036159494d43007f414141'
-    '0204081020004141417f04020102044040404040000307080020545478407f284444383844444428384444287f3854545418'
-    '00087e090218a4a49c787f0804047800447d40002040403d007f1028440000417f40007c047804787c080404783844444438'
-    'fc1824241818242418fc7c08040408485454542404043f44243c4040207c1c2040201c3c4030403c44281028444c9090907c'
-    '4464544c440008364100000077000000413608000201020402'
-)
-GLYPHS = {chr(32 + i): [int(FONT5X7[i * 10 + j * 2:i * 10 + j * 2 + 2], 16)
-                        for j in range(5)] for i in range(95)}
+# Spleen bitmap font (https://github.com/fcambus/spleen), BSD 2-Clause,
+# Copyright (c) 2018-2026 Frederic Cambus. ASCII 32-126, row-major,
+# MSB = leftmost pixel, zlib+base64 packed. Native sizes, not scaled blocks.
+SPLEEN = {
+    '6x12': (6, 12,
+        'eNpdVMtqwzAQNIowIpgijA8+qEIsbjCmmJBDyMGo//9X3WesdiHJeLQaza7W6bomAkcXCE/TdC5M'
+        'FR8rESGva7perwcluXHy4TpGShnGcZi/4FN1bGcfIkfou272jsPPvDQOP8P4Prmee/g5Kqrdn+Bj'
+        'nfeYEEvBhwS37QGQeHHmAhgncC6VUhUPzklOKcuyVO9Zu5QD/RycgxhUp4LzQYtIyBlPIKNs4yWc'
+        'WDzjTqzWu7d9LYA4WlM/3vqMmvu+l2z6FT+E0Qz5YW+5cGTloeEP4xUXxTtZJaySrJlC0x/Bd8lZ'
+        'XovmlOYseNbN9sLjsW23G5hP6wmb1HON743XvegnWZ9r0CkTb9D4pK3J8Fafci5MYTIP0n/RoWbK'
+        '/eaokck+dj947DXyToMOQJHuf1S5l4ZJLqsfGQfps94A844yNAd57K7wHzEe5OHNYzHkVHVAhoQH'
+        'dCDsO88xy0yu93XhHC1lEJ1j2zZQ46eOdjo1vF5B1hY5xjYP5D9p32J8NfrQ1EJwCoat/4RTAmjz'
+        'RYpvoPI7jnN0x6/e/kLkgmcs73LRGvmN/+afXwNlQ8g='
+    ),
+    '8x16': (8, 16,
+        'eNp1VLFu4zAM9ZRJCDIVGop+g3BD4SHoF/QDOmbyZBw8FgdB3yZ04GQEmYygQ8ZMRZHp0CFQS5ES'
+        'Jbsth8TPj6beI2k3zTI0B/4T7DBmfN+Hvqcfght3OBzsDcZ1QzdWXa+0NvfdjvNbTG6H13H8J+Xr'
+        'cmttzA7DGL2OeNBKrTCU0kNK6bb6U2+7WqKbF+GbpgDX/OCL5cXKdKb3dMMC7E//zwA25bXPT9SB'
+        'VMMCPqLNDkLBWxSY870fMYJSinEA768VbyMGkPqB62FkHqmKp2tXns/SK8cJcwEStzNarWr3pQFE'
+        'UZLoj8c3+fzGvrxinHx1fogagHHUTvqvqbhP4QoPC/6j4gX7gk/kkTEsznNpAXP/BV8kf/wYS75f'
+        '6IH3MEFVD+B8nqb9PmOb9drKX6Uv8dNktZr5h6Lfxg1Nfj+zPl38wMIfRt9uajyFd9GHXF/rpfFL'
+        '/cDD857378FIPLB9enforSH5SoIMbrB281tgSaPVt9t25Yp+n9Y3z1dWIPGo1NV+I48TFf4OlVpT'
+        '9p352H+2KPVBlruldt4Klg4PnD8eL5fjmPKlHbdS/23CgGJ7Vl9GbBf8tawo5CFkXO0H+7cyH7F3'
+        'Jzws+jGbP+Eo8G/BfRs3YPl8tQJxA0L6XsY+DPF3XX2uZQGZWeducfxxj+nqC7fzkno='
+    ),
+    '12x24': (12, 24,
+        'eNqtWL1u2zAQJnvAcSE0C0XgZ9AUdCiKPoomT56LDkXhyVMfwFOeIVNmTXmGDB30CAYKBB4EoSea'
+        'lEjqSKpp7kMCWDxd7ufj3TlCvFFaFu4kENA+tpm/6aoxfNd9XvsiR2jRAlp5FQextzio69onEg2/'
+        '8AVf4FE05rwTv+WTfII74By6yLPzQp7FBRr8iBVq1LCTf7K5KUslauNDJzp5DDE9o5OGNCqnroR5'
+        'Pj2dnodobpbkUSXyOnkvWjWSlolpW6Vh2BwNlwvyp1DvQfwPEyNjBCRowpKTOb/u2Bd5BY2TVLjD'
+        'e9zjszop84AydmX+ai97aD+wt4CL5WZfoPWrdlUiT5BqkdPX4ko/9t2UP/a49kF2HStWokac3VEb'
+        '7MsBPH285SqTn8l+HK2HRLzOHhTtRzooxzkCDdd/YkyZ1b5Gis9hTYlh8x2tRfaOLdXneLBQOrAX'
+        'cajAn9ryv83FO2f0m4efJpKhlH/DJk+YKH3O6PgTY38EV9AI5M9YsB/KBvv0dsF+Wj/uJKz/XyKu'
+        'ru9vIOV8zv14Y//J6Peqy/qjqZNcqJ/onD+YBJ9PirFSD/hKnZYRVn/CSZ3wmbAn3BN2hAqrEj99'
+        'SfSrmJ+l+nL2jVfwmezXZvZs4z8br88fyqDXoQXLZzPP0yjwLcjPBn66TLptYqP9Pb6qB1Xx9Q0r'
+        'BLrEB777Eyo1sPnhZu/tNo9h5uMdLInRtX5t6zR16XlnW/Yzp2CZsNrZEpjr/JW2jUegG6hRvKO4'
+        'uOfJ8gYBy0zia54/7O6Q7s/pOcD3E3e8+JHns2d/6bk5+z9E77YXirmLsMG+589g+eBtKpn8sPx3'
+        't1r2zG3/ntlhcl2iU0d/hTaYvvHU0ABtu/S7pk8UAWO/S6Kn3KU5eMaD6ZsOqXizcz6T/1WfTuzz'
+        'afvBNNhU3zE9Ooz+akZm7tc4835w6lx/y3Azm/+t/Z/v0+n+H+l7FYa9fMjrW6v2G3e+vgn/k5PS'
+        'zIFoBkR7927elud7AUc42p6+oCHN/H9D2BmsOEt3hCZ9GyNO0A6kD/oTd/YXzShpeA=='
+    ),
+    '16x32': (16, 32,
+        'eNqtWE1urDgQLoTUbBjQ7BwFPa5gFOnF0aD2VTjAW7CcBXrhAH2EHIbVrPoIb+EDRCOWLNDTlE2T'
+        'YDC26QmflDTgosr181UBwNcdQbuP5QqTLFkd9+ifZV9/v/5eP295bc/2dMzHl7a44aXN+3QI3oLL'
+        'Am984P3eHiBO4keCoAmFCtFBJ9eGEMKJnX7ECML2txaJtM/YbGXG0j4Secu7+r1qKlbRitUN/zf/'
+        'x8f3B11XwhiIsI3gBAnEkAFZIcOrCd6NIGwDASNKaOIcojboQOCua6DANg9geLXGuyLoopbr4ps4'
+        'ZiypIxF2YSfjJv9HIqmlb47mYj7kw50+2Xnm5CXfg498/OoKM9w4IWKE9DSFbfYZbm+PtM8HltEY'
+        'kdGSNvS9uD5dnuNzXMZMXo1Zlg9pv2cdeqb9o31o/7TwgIzHnvysH+KbsdLQTu7gNJ2iBTZ/ruWj'
+        'PupRbD532k9nrA6lky5gibXy3m0Z7/mgCsdT/4f/F/J0iscNdvlZ/9Z/Opz6FQhJ+7QnxF+/Lq/W'
+        'x/mYjr77d+f6kTrernXWb4YsVUuGkmsSdcrwbzKxnmS3Wl04WPe+HGDUZbDJK/9v0Z84wN1/tzEs'
+        'rguMxUgVrWP8Bv/4f1SEhl2f6flO8LynWv7RTPbfXf3Yv5lWqGug/TIf/fSbcFA/F1z463fLW+nH'
+        'tP+RjoZ63OO/zX6PxW/Za+/hf7d82L7CT/CynyBxV7zjHa3wF/Gxnzphj5/kt7I8N8/vT9fisp9F'
+        'NvsZokR8Rzwhigs+6Yr4gSgRGc38628NR/9Y57/K9gP5Z9E/7YP9UvrlQ+Qo4tJvYgCL/9b5j9HC'
+        'CX7ZgcFav3LWdOWvjT+tzHFX/S0jN8/E9+gvLk/X5/dzU5aqP3jIz/qmuVuPqq9+vfu7/a/65P70'
+        'NzGioZemqCWGY0i1OMh5eE5KeVfOy3JSUtHGHmpcsMzb3oM8NCgZbTaZ33FYVieV/wvGnYfMdf0F'
+        '4mPuqL7i+TlywVR5qir98n/Z+cy92Jo/7lnAzt/LBFla7Vu/G/3LLuqhPxjCIVKpNSEXuTjBFkf1'
+        'b/ifmGvRw//W+l+yY4Tvgkb2FIHwkXezcNjm8E3/brAEJTURD90jrsrhsX3oiMArjGRk1/6TE1gj'
+        'QzD4+P9cn/8u3mTX+4TLf76zqFf8jb3Y//3LVn/es2js0RFc8uA/f5jrX5sCrPxxctaef/zv6f/W'
+        'XurR/03yega+XL41SeMn/6nx8+vblFH/e//+s8BmCjC+S4/BGG6+ckRwhhJxllFbow1GGH2/Xbtm'
+        'QA5cds41BDTKgAZ/re4FHW+504dJnMd/vRUDtVTsf0gixBM='
+    ),
+}
+
+# scale -> (font, pixel multiplier). Big sizes use larger native fonts so
+# letterforms stay smooth; only 6 and 7 pixel-double.
+SCALES = {2: ('6x12', 1), 3: ('8x16', 1), 4: ('12x24', 1),
+          5: ('16x32', 1), 6: ('12x24', 2), 7: ('16x32', 2)}
+
+_GLYPH_CACHE = {}
+
+
+def glyphs_for(name):
+    if name not in _GLYPH_CACHE:
+        W, H, b64 = SPLEEN[name]
+        raw = zlib.decompress(base64.b64decode(b64))
+        nb = (W + 7) // 8
+        _GLYPH_CACHE[name] = [
+            [int.from_bytes(raw[(i * H + r) * nb:(i * H + r + 1) * nb], 'big')
+             for r in range(H)]
+            for i in range(95)]
+    return _GLYPH_CACHE[name]
 
 # Display-only fallbacks for common non-ASCII so big mode never breaks.
 BITMAP_TRANS = str.maketrans({'’': "'", '‘': "'", '“': '"', '”': '"',
@@ -143,28 +210,35 @@ def save_config(wpm, scale):
         pass
 
 
-def render_big(word, o, ps):
-    """Render word as half-block glyph lines at pixel scale ps.
+def render_big(word, o, scale):
+    """Render word as half-block glyph lines for the given scale level.
 
     Returns (lines, orp_center) — ANSI-colored lines with no indent, and the
     cell column of the ORP letter's center within them.
     """
+    fname, ps = SCALES[scale]
+    W, H, _ = SPLEEN[fname]
+    glyphs = glyphs_for(fname)
     word = word.translate(BITMAP_TRANS)
-    cw = 6 * ps  # cells per char: 5px glyph + 1px gap, ps cells per px
-    width, grid_h = cw * len(word), 7 * ps
+    cw = W * ps
+    width, grid_h = cw * len(word), H * ps
     grid = [[0] * width for _ in range(grid_h + grid_h % 2)]
     for ci, ch in enumerate(word):
-        cols = GLYPHS.get(ch if ch in GLYPHS else '?')
+        gi = ord(ch) - 32
+        rows = glyphs[gi] if 0 <= gi < 95 else glyphs[ord('?') - 32]
         val = 2 if ci == o else 1
-        for x in range(5):
-            for y in range(7):
-                if (cols[x] >> y) & 1:
+        for y in range(H):
+            bits = rows[y]
+            if not bits:
+                continue
+            for x in range(W):
+                if (bits >> (W - 1 - x)) & 1:
                     for dy in range(ps):
                         row = grid[y * ps + dy]
                         for dx in range(ps):
                             row[ci * cw + x * ps + dx] = val
     lines = []
-    for r in range(0, len(grid), 2):
+    for r in range(0, grid_h + grid_h % 2, 2):
         top, bot, out, cur = grid[r], grid[r + 1], [], None
         for x in range(width):
             t, b = top[x], bot[x]
@@ -176,7 +250,7 @@ def render_big(word, o, ps):
                     cur = col
             out.append(ch)
         lines.append(''.join(out) + RST)
-    return lines, o * cw + (5 * ps) // 2
+    return lines, o * cw + cw // 2
 
 
 class Keys:
@@ -230,17 +304,21 @@ def draw(words, i, wpm, scale, playing, done):
     word = words[i][0]
     o = orp_index(word)
 
-    # Auto-fit: shrink pixel scale until the word fits this terminal.
-    ps = scale - 1
-    while ps > 0 and (6 * ps * len(word) > cols - 2
-                      or 7 * ps // 2 + 7 > rows):
-        ps -= 1
+    # Auto-fit: step down the size ladder until the word fits this terminal.
+    eff = scale
+    while eff > 1:
+        fname, ps = SCALES[eff]
+        W, H, _ = SPLEEN[fname]
+        if W * ps * len(word) <= cols - 2 and H * ps // 2 + 7 <= rows:
+            break
+        eff -= 1
 
-    if ps > 0:
-        glines, orp_center = render_big(word, o, ps)
+    if eff > 1:
+        glines, orp_center = render_big(word, o, eff)
         indent = ' ' * max(0, pivot - orp_center)
         body = ['\r\n'] + [indent + ln + '\r\n' for ln in glines] + ['\r\n']
-        word_w = 6 * ps * len(word)
+        fname, ps = SCALES[eff]
+        word_w = SPLEEN[fname][0] * ps * len(word)
     else:
         left, mid, right = word[:o], word[o:o + 1], word[o + 1:]
         body = ['\r\n', ' ' * max(0, pivot - len(left))
@@ -285,7 +363,7 @@ def main():
                     help='words per minute (default: saved config, $RIF_WPM, or 350)')
     ap.add_argument('-s', '--scale', type=int, default=None,
                     help=f'text size {MIN_SCALE}-{MAX_SCALE}; 1 = normal terminal '
-                         'text, 2+ = big block glyphs (default: saved config, or 2)')
+                         'text, 2-7 = bitmap glyphs (default: saved config, or 3)')
     ap.add_argument('--rm', action='store_true',
                     help='delete FILE after reading it in')
     a = ap.parse_args()
@@ -327,7 +405,7 @@ def main():
     wpm = a.wpm if a.wpm is not None else cfg_int(
         'wpm', os.environ.get('RIF_WPM', 350))
     wpm = max(MIN_WPM, min(MAX_WPM, wpm))
-    scale = a.scale if a.scale is not None else cfg_int('scale', 2)
+    scale = a.scale if a.scale is not None else cfg_int('scale', 3)
     scale = max(MIN_SCALE, min(MAX_SCALE, scale))
 
     i, playing, done, streak = 0, True, False, 0
