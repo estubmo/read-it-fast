@@ -64,8 +64,20 @@ vim.keymap.set('x', '<leader>R', ':w !rif-tmux<CR>', { desc = 'Speed-read select
 | `h` / `l`, `←` / `→` | previous / next word |
 | `,` / `.` | previous / next sentence |
 | `j` / `k`, `↓` / `↑` | slower / faster (±25 wpm) |
+| `+` / `-` | bigger / smaller text |
 | `g` | restart |
 | `q` / `esc` | quit |
+
+## Text size
+
+Terminals can't change their font size from inside a program, so sizes 2-5
+render words as big block glyphs (a built-in 5x7 bitmap font from Adafruit-GFX,
+drawn with Unicode half-blocks), with the ORP letter still colored. Size 1 is
+plain terminal text. Words too big for the window auto-shrink to fit.
+
+Speed and size persist across runs in `~/.config/rif/config` (or
+`$XDG_CONFIG_HOME/rif/config`) — whatever you set with the keys is what you
+get next time. `-w`/`-s` flags override the saved values for one run.
 
 ## Behavior
 

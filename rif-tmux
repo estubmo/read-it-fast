@@ -12,7 +12,7 @@ if ! grep -q '[^[:space:]]' "$f"; then
 fi
 
 if [ -n "${TMUX:-}" ]; then
-    tmux display-popup -w 80% -h 12 -E "rif --rm '$f'"
+    tmux display-popup -w 90% -h 60% -E "rif --rm '$f'"
 else
     rif --rm "$f"
 fi

@@ -15,7 +15,10 @@ Keys:
   h / left  back one word        l / right  forward one word
   , or ;    previous sentence    .          next sentence
   k / up    faster (+25 wpm)     j / down   slower (-25 wpm)
+  + / -     bigger / smaller text (1 = plain, 2+ = block glyphs)
   g         restart              q / esc    quit
+
+Speed and text size persist across runs in ~/.config/rif/config.
 """
 
 import argparse
@@ -38,6 +41,29 @@ REV = '\x1b[7m'
 RST = '\x1b[0m'
 
 MIN_WPM, MAX_WPM, WPM_STEP = 60, 1500, 25
+MIN_SCALE, MAX_SCALE = 1, 5  # 1 = plain terminal text, 2+ = block glyphs
+
+# Classic 5x7 bitmap font (ASCII 32-126), column-major, bit 0 = top row.
+# Extracted from Adafruit-GFX glcdfont.c (BSD license).
+FONT5X7 = (
+    '000000000000005f00000007000700147f147f14242a7f2a12231308646236495620500008070300001c2241000041221c00'
+    '2a1c7f1c2a08083e080800807030000808080808000060600020100804023e5149453e00427f400072494949462141494d33'
+    '1814127f1027454545393c4a49493141211109073649494936464949291e0000140000004034000000081422411414141414'
+    '004122140802015909063e415d594e7c1211127c7f494949363e414141227f4141413e7f494949417f090909013e41415173'
+    '7f0808087f00417f41002040413f017f081422417f404040407f021c027f7f0408107f3e4141413e7f090909063e4151215e'
+    '7f09192946264949493203017f01033f4040403f1f2040201f3f4038403f631408146303047804036159494d43007f414141'
+    '0204081020004141417f04020102044040404040000307080020545478407f284444383844444428384444287f3854545418'
+    '00087e090218a4a49c787f0804047800447d40002040403d007f1028440000417f40007c047804787c080404783844444438'
+    'fc1824241818242418fc7c08040408485454542404043f44243c4040207c1c2040201c3c4030403c44281028444c9090907c'
+    '4464544c440008364100000077000000413608000201020402'
+)
+GLYPHS = {chr(32 + i): [int(FONT5X7[i * 10 + j * 2:i * 10 + j * 2 + 2], 16)
+                        for j in range(5)] for i in range(95)}
+
+# Display-only fallbacks for common non-ASCII so big mode never breaks.
+BITMAP_TRANS = str.maketrans({'’': "'", '‘': "'", '“': '"', '”': '"',
+                              '—': '-', '–': '-', '…': '.', '•': '*',
+                              '«': '"', '»': '"', '´': "'", '`': "'"})
 
 
 def orp_index(word):
@@ -90,6 +116,69 @@ def ramp(streak):
     return (2.2, 1.8, 1.5, 1.3, 1.15)[streak] if streak < 5 else 1.0
 
 
+def config_path():
+    return os.path.join(os.environ.get('XDG_CONFIG_HOME',
+                        os.path.expanduser('~/.config')), 'rif', 'config')
+
+
+def load_config():
+    cfg = {}
+    try:
+        with open(config_path()) as f:
+            for ln in f:
+                if '=' in ln:
+                    k, v = ln.split('=', 1)
+                    cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def save_config(wpm, scale):
+    try:
+        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
+        with open(config_path(), 'w') as f:
+            f.write(f'wpm={wpm}\nscale={scale}\n')
+    except OSError:
+        pass
+
+
+def render_big(word, o, ps):
+    """Render word as half-block glyph lines at pixel scale ps.
+
+    Returns (lines, orp_center) — ANSI-colored lines with no indent, and the
+    cell column of the ORP letter's center within them.
+    """
+    word = word.translate(BITMAP_TRANS)
+    cw = 6 * ps  # cells per char: 5px glyph + 1px gap, ps cells per px
+    width, grid_h = cw * len(word), 7 * ps
+    grid = [[0] * width for _ in range(grid_h + grid_h % 2)]
+    for ci, ch in enumerate(word):
+        cols = GLYPHS.get(ch if ch in GLYPHS else '?')
+        val = 2 if ci == o else 1
+        for x in range(5):
+            for y in range(7):
+                if (cols[x] >> y) & 1:
+                    for dy in range(ps):
+                        row = grid[y * ps + dy]
+                        for dx in range(ps):
+                            row[ci * cw + x * ps + dx] = val
+    lines = []
+    for r in range(0, len(grid), 2):
+        top, bot, out, cur = grid[r], grid[r + 1], [], None
+        for x in range(width):
+            t, b = top[x], bot[x]
+            ch = (' ', '▀', '▄', '█')[(1 if t else 0) + (2 if b else 0)]
+            if ch != ' ':
+                col = 2 if 2 in (t, b) else 1
+                if col != cur:
+                    out.append(RED if col == 2 else RST)
+                    cur = col
+            out.append(ch)
+        lines.append(''.join(out) + RST)
+    return lines, o * cw + (5 * ps) // 2
+
+
 class Keys:
     """Raw key input from the controlling terminal (not stdin, which may be a pipe)."""
 
@@ -135,21 +224,37 @@ class Keys:
             self.fd = None
 
 
-def draw(words, i, wpm, playing, done):
+def draw(words, i, wpm, scale, playing, done):
     cols, rows = shutil.get_terminal_size()
     pivot = max(12, cols // 2)
     word = words[i][0]
     o = orp_index(word)
-    arm = min(12, pivot - 2)
 
+    # Auto-fit: shrink pixel scale until the word fits this terminal.
+    ps = scale - 1
+    while ps > 0 and (6 * ps * len(word) > cols - 2
+                      or 7 * ps // 2 + 7 > rows):
+        ps -= 1
+
+    if ps > 0:
+        glines, orp_center = render_big(word, o, ps)
+        indent = ' ' * max(0, pivot - orp_center)
+        body = ['\r\n'] + [indent + ln + '\r\n' for ln in glines] + ['\r\n']
+        word_w = 6 * ps * len(word)
+    else:
+        left, mid, right = word[:o], word[o:o + 1], word[o + 1:]
+        body = ['\r\n', ' ' * max(0, pivot - len(left))
+                + left + RED + mid + RST + right + '\r\n', '\r\n']
+        word_w = len(word)
+
+    arm = max(12, min(word_w // 2 + 2, pivot - 1, cols - pivot - 2))
     top = ' ' * (pivot - arm) + DIM + '─' * arm + '┬' + '─' * arm + RST
     bot = ' ' * (pivot - arm) + DIM + '─' * arm + '┴' + '─' * arm + RST
-    left, mid, right = word[:o], word[o:o + 1], word[o + 1:]
-    wline = ' ' * max(0, pivot - len(left)) + left + RED + mid + RST + right
 
-    pad_top = max(0, rows // 2 - 3)
-    buf = ['\x1b[2J\x1b[H', '\r\n' * pad_top,
-           top, '\r\n\r\n', wline, '\r\n\r\n', bot]
+    pad_top = max(0, (rows - len(body) - 4) // 2)
+    buf = ['\x1b[2J\x1b[H', '\r\n' * pad_top, top, '\r\n']
+    buf.extend(body)
+    buf.append(bot)
 
     if not playing and not done:
         lo, hi = max(0, i - 8), min(len(words), i + 9)
@@ -163,8 +268,9 @@ def draw(words, i, wpm, playing, done):
 
     pct = (i + 1) * 100 // len(words)
     state = 'done — space replays' if done else ('paused' if not playing else '')
-    status = f' {wpm} wpm · {i + 1}/{len(words)} ({pct}%)  {state}'
-    keys_help = ' space pause · h/l word · ,/. sentence · j/k speed · g restart · q quit'
+    status = f' {wpm} wpm · ×{scale} · {i + 1}/{len(words)} ({pct}%)  {state}'
+    keys_help = (' space pause · h/l word · ,/. sentence · j/k speed'
+                 ' · +/- size · g restart · q quit')
     buf.append(f'\x1b[{max(1, rows - 1)};1H{DIM}{status}{RST}')
     buf.append(f'\x1b[{rows};1H{DIM}{keys_help[:cols - 1]}{RST}')
     sys.stdout.write(''.join(buf))
@@ -175,12 +281,16 @@ def main():
     ap = argparse.ArgumentParser(prog='rif', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('file', nargs='?', help='text file (default: stdin)')
-    ap.add_argument('-w', '--wpm', type=int,
-                    default=int(os.environ.get('RIF_WPM', 350)),
-                    help='words per minute (default 350, or $RIF_WPM)')
+    ap.add_argument('-w', '--wpm', type=int, default=None,
+                    help='words per minute (default: saved config, $RIF_WPM, or 350)')
+    ap.add_argument('-s', '--scale', type=int, default=None,
+                    help=f'text size {MIN_SCALE}-{MAX_SCALE}; 1 = normal terminal '
+                         'text, 2+ = big block glyphs (default: saved config, or 2)')
     ap.add_argument('--rm', action='store_true',
                     help='delete FILE after reading it in')
     a = ap.parse_args()
+
+    cfg = load_config()
 
     if a.file:
         with open(a.file, errors='replace') as f:
@@ -208,14 +318,25 @@ def main():
         cands = [s for s in sent_starts if s > i]
         return cands[0] if cands else len(words) - 1
 
-    wpm = max(MIN_WPM, min(MAX_WPM, a.wpm))
+    def cfg_int(key, fallback):
+        try:
+            return int(cfg.get(key, fallback))
+        except ValueError:
+            return int(fallback)
+
+    wpm = a.wpm if a.wpm is not None else cfg_int(
+        'wpm', os.environ.get('RIF_WPM', 350))
+    wpm = max(MIN_WPM, min(MAX_WPM, wpm))
+    scale = a.scale if a.scale is not None else cfg_int('scale', 2)
+    scale = max(MIN_SCALE, min(MAX_SCALE, scale))
+
     i, playing, done, streak = 0, True, False, 0
     keys = Keys()
 
     try:
         sys.stdout.write('\x1b[?1049h\x1b[?25l')
         while True:
-            draw(words, i, wpm, playing, done)
+            draw(words, i, wpm, scale, playing, done)
             k = None
             if playing and not done:
                 deadline = time.monotonic() + delay_for(
@@ -256,6 +377,10 @@ def main():
                 wpm = min(wpm + WPM_STEP, MAX_WPM)
             elif k in ('j', 'DOWN'):
                 wpm = max(wpm - WPM_STEP, MIN_WPM)
+            elif k in ('+', '='):
+                scale = min(scale + 1, MAX_SCALE)
+            elif k in ('-', '_'):
+                scale = max(scale - 1, MIN_SCALE)
             elif k in (',', ';'):
                 i, done, streak = prev_sentence(i), False, 0
             elif k == '.':
@@ -268,6 +393,7 @@ def main():
         sys.stdout.write('\x1b[?25h\x1b[?1049l')
         sys.stdout.flush()
         keys.close()
+        save_config(wpm, scale)
 
 
 if __name__ == '__main__':
