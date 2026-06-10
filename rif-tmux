@@ -1,0 +1,18 @@
+#!/bin/sh
+# rif-tmux — receive text on stdin, speed-read it in a tmux popup.
+# Falls back to running rif inline when not inside tmux.
+set -eu
+
+f=$(mktemp "${TMPDIR:-/tmp}/rif.XXXXXX")
+cat >"$f"
+
+if ! grep -q '[^[:space:]]' "$f"; then
+    rm -f "$f"
+    exit 0
+fi
+
+if [ -n "${TMUX:-}" ]; then
+    tmux display-popup -w 80% -h 12 -E "rif --rm '$f'"
+else
+    rif --rm "$f"
+fi
